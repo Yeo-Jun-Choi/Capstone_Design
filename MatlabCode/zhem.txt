@@ -1,0 +1,67 @@
+mdl = 'Quadrotor_Controller_'
+open_system(mdl)
+open_system([mdl '/generate observations'])
+observationInfo = rlNumericSpec([6 1], 'LowerLimit',[-inf -inf -inf -inf -inf -0.05]', 'UpperLimit', [inf inf inf inf inf 0.05]');
+observationInfo.Name = 'observations';
+actionInfo = rlNumericSpec([1 1]);
+actionInfo.Name = 'flow'
+actionInfo.LowerLimit = -0.05
+actionInfo.UpperLimit = 0.05
+numOb = observationInfo.Dimension(1);
+numAc = actionInfo.Dimension(1);
+env = rlSimulinkEnv(mdl,[mdl '/RL Agent'], observationInfo, actionInfo);
+Ts = 0.01;
+Tf = 25;
+statePath = [
+featureInputLayer(numOb,'Normalization','none','Name','State')
+fullyConnectedLayer(100,'Name','CriticStateFC1')
+reluLayer('Name','CriticRelu1')
+fullyConnectedLayer(50,'Name','CriticStateFC2')
+reluLayer('Name','CriticRelu2')
+fullyConnectedLayer(25,'Name','CriticStateFC3')];
+actionPath = [
+featureInputLayer(numAc,'Normalization','none','Name','Action')
+fullyConnectedLayer(25,'Name','CriticActionFC1')];
+commonPath = [
+additionLayer(2,'Name','add')
+reluLayer('Name','CriticCommonRelu')
+fullyConnectedLayer(1,'Name','CriticOutput')];
+criticNetwork = layerGraph();
+criticNetwork = addLayers(criticNetwork,statePath);
+criticNetwork = addLayers(criticNetwork,actionPath);
+criticNetwork = addLayers(criticNetwork,commonPath);
+criticNetwork = connectLayers(criticNetwork,'CriticStateFC3','add/in1');
+criticNetwork = connectLayers(criticNetwork,'CriticActionFC1','add/in2');
+figure
+plot(criticNetwork)
+criticOpts = rlRepresentationOptions('LearnRate',1e-01,'GradientThreshold',1);
+critic = rlQValueRepresentation(criticNetwork,observationInfo,actionInfo,'Observation',{'State'},'Action',{'Action'},criticOpts);
+actorNetwork = [
+featureInputLayer(numOb,'Normalization','none','Name','State')
+fullyConnectedLayer(3, 'Name','actorFC')
+tanhLayer('Name','actorTanh')
+fullyConnectedLayer(numAc,'Name','Action')
+];
+actorOptions = rlRepresentationOptions('LearnRate',1e-02,'GradientThreshold',1);
+actor = rlDeterministicActorRepresentation(actorNetwork,observationInfo,actionInfo,'Observation',{'State'},'Action',{'Action'},actorOptions);
+agentOpts = rlDDPGAgentOptions(...
+'SampleTime',Ts,...
+'TargetSmoothFactor',1e-3,...
+'DiscountFactor',1.0, ...
+'MiniBatchSize',64, ...
+'ExperienceBufferLength',1e6);
+agentOpts.NoiseOptions.Variance = sqrt(0.3);
+agentOpts.NoiseOptions.VarianceDecayRate = 1e-5;
+agent = rlDDPGAgent(actor,critic,agentOpts);
+maxepisodes = 5000;
+maxsteps = ceil(Tf/Ts);
+trainOpts = rlTrainingOptions(...
+'MaxEpisodes',maxepisodes, ...
+'MaxStepsPerEpisode',maxsteps, ...
+'ScoreAveragingWindowLength',20, ...
+'UseParallel',false, ...
+'Verbose',false, ...
+'Plots','training-progress',...
+'StopTrainingCriteria','AverageReward',...
+'StopTrainingValue',800);
+trainingStats = train(agent,env,trainOpts);

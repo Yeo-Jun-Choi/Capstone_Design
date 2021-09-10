@@ -1,0 +1,101 @@
+mdl = 'Quadrotor_Controller'
+open_system(mdl)
+open_system([mdl '/generate observations'])
+observationInfo = rlNumericSpec([6 1], 'LowerLimit',[-inf -inf -inf -inf -inf -0.05]', 'UpperLimit', [inf inf inf inf inf 0.05]');
+observationInfo.Name = 'observations';
+actionInfo = rlNumericSpec([1 1]);
+actionInfo.Name = 'flow'
+actionInfo.LowerLimit = -0.05
+actionInfo.UpperLimit = 0.05
+numOb = observationInfo.Dimension(1);
+numAc = actionInfo.Dimension(1);
+env = rlSimulinkEnv(mdl,[mdl '/RL Agent'], observationInfo, actionInfo);
+
+Ts = 0.01;
+Tf = 25;
+
+statePath1 = [
+    featureInputLayer(numOb,'Normalization','none','Name','observation')
+    fullyConnectedLayer(400,'Name','CriticStateFC1')
+    reluLayer('Name','CriticStateRelu1')
+    fullyConnectedLayer(300,'Name','CriticStateFC2')
+    ];
+actionPath1 = [
+    featureInputLayer(numAc,'Normalization','none','Name','action')
+    fullyConnectedLayer(300,'Name','CriticActionFC1')
+    ];
+commonPath1 = [
+    additionLayer(2,'Name','add')
+    reluLayer('Name','CriticCommonRelu1')
+    fullyConnectedLayer(1,'Name','CriticOutput')
+    ];
+
+criticNet = layerGraph(statePath1);
+criticNet = addLayers(criticNet,actionPath1);
+criticNet = addLayers(criticNet,commonPath1);
+criticNet = connectLayers(criticNet,'CriticStateFC2','add/in1');
+criticNet = connectLayers(criticNet,'CriticActionFC1','add/in2');
+
+criticOptions = rlRepresentationOptions('Optimizer','adam','LearnRate',1e-1,... 
+                                        'GradientThreshold',1,'L2RegularizationFactor',2e-4);
+critic1 = rlQValueRepresentation(criticNet,observationInfo,actionInfo,...
+    'Observation',{'observation'},'Action',{'action'},criticOptions);
+critic2 = rlQValueRepresentation(criticNet,observationInfo,actionInfo,...
+    'Observation',{'observation'},'Action',{'action'},criticOptions);
+
+statePath = [
+    featureInputLayer(numOb,'Normalization','none','Name','observation')
+    fullyConnectedLayer(400, 'Name','commonFC1')
+    reluLayer('Name','CommonRelu')];
+meanPath = [
+    fullyConnectedLayer(300,'Name','MeanFC1')
+    reluLayer('Name','MeanRelu')
+    fullyConnectedLayer(numAc,'Name','Mean')
+    ];
+stdPath = [
+    fullyConnectedLayer(300,'Name','StdFC1')
+    reluLayer('Name','StdRelu')
+    fullyConnectedLayer(numAc,'Name','StdFC2')
+    softplusLayer('Name','StandardDeviation')];
+
+concatPath = concatenationLayer(1,2,'Name','GaussianParameters');
+
+actorNetwork = layerGraph(statePath);
+actorNetwork = addLayers(actorNetwork,meanPath);
+actorNetwork = addLayers(actorNetwork,stdPath);
+actorNetwork = addLayers(actorNetwork,concatPath);
+actorNetwork = connectLayers(actorNetwork,'CommonRelu','MeanFC1/in');
+actorNetwork = connectLayers(actorNetwork,'CommonRelu','StdFC1/in');
+actorNetwork = connectLayers(actorNetwork,'Mean','GaussianParameters/in1');
+actorNetwork = connectLayers(actorNetwork,'StandardDeviation','GaussianParameters/in2');
+
+actorOptions = rlRepresentationOptions('Optimizer','adam','LearnRate',1e-1,...
+                                       'GradientThreshold',1,'L2RegularizationFactor',1e-5);
+figure
+plot(actorNetwork)
+
+actor = rlStochasticActorRepresentation(actorNetwork,observationInfo,actionInfo,actorOptions,...
+    'Observation',{'observation'});
+
+agentOpts = rlSACAgentOptions(...
+'SampleTime',Ts,...
+'TargetSmoothFactor',1e-3,...
+'DiscountFactor',1.0, ...
+'MiniBatchSize',64, ...
+'ExperienceBufferLength',1e6);
+
+agent = rlSACAgent(actor,[critic1 critic2],agentOpts);
+
+maxepisodes = 5000;
+maxsteps = ceil(Tf/Ts);
+trainOpts = rlTrainingOptions(...
+'MaxEpisodes',maxepisodes, ...
+'MaxStepsPerEpisode',maxsteps, ...
+'ScoreAveragingWindowLength',20, ...
+'UseParallel',false, ...
+'Verbose',false, ...
+'Plots','training-progress',...
+'StopTrainingCriteria','AverageReward',...
+'StopTrainingValue',800);
+
+trainingStats = train(agent,env,trainOpts);
